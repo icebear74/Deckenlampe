@@ -102,6 +102,9 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
       Serial.println("WPS Successful, stopping WPS and connecting to: " + String(WiFi.SSID()));
       esp_wifi_wps_disable();
       delay(INITIAL_DELAY_MS);
+      
+      // WiFi.begin() without parameters will use the credentials stored by WPS
+      // These are automatically saved to NVS (Non-Volatile Storage) by ESP32
       WiFi.begin();
       
       // Wait for connection
@@ -114,7 +117,10 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
         
         if (WiFi.status() == WL_CONNECTED) {
           Serial.println("WPS connection established!");
+          Serial.println("WiFi credentials saved to NVS for future use");
           syncTimeWithNTP();
+        } else {
+          Serial.println("WPS pairing succeeded but connection failed");
         }
       }
       break;
@@ -150,80 +156,15 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
  * @return true if connected successfully, false otherwise
  */
 bool connectToBestAP() {
-  Serial.println("Scanning for WiFi networks...");
+  Serial.println("Attempting to connect with saved credentials...");
   
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(100);
   
-  int n = WiFi.scanNetworks();
+  // First, try to connect with saved credentials (no parameters)
+  // This will use credentials stored in NVS from previous WPS or manual config
+  WiFi.begin();
   
-  if (n == 0) {
-    Serial.println("No WiFi networks found!");
-    return false;
-  }
-  
-  Serial.printf("Found %d networks\n", n);
-  
-  // Check if we have any saved credentials by trying to get SSID
-  String savedSSID = WiFi.SSID();
-  
-  // If no saved SSID, we need WPS
-  if (savedSSID.isEmpty()) {
-    Serial.println("No saved WiFi credentials found");
-    return false;
-  }
-  
-  // Find all APs matching the saved SSID
-  std::vector<WiFiAP> matchingAPs;
-  
-  for (int i = 0; i < n; ++i) {
-    if (WiFi.SSID(i) == savedSSID) {
-      WiFiAP ap;
-      ap.ssid = WiFi.SSID(i);
-      ap.bssid = WiFi.BSSIDstr(i);
-      ap.rssi = WiFi.RSSI(i);
-      ap.channel = WiFi.channel(i);
-      matchingAPs.push_back(ap);
-    }
-  }
-  
-  if (matchingAPs.empty()) {
-    Serial.printf("Saved network '%s' not found in scan results\n", savedSSID.c_str());
-    return false;
-  }
-  
-  // Sort by signal strength (RSSI) - strongest first
-  std::sort(matchingAPs.begin(), matchingAPs.end(), 
-    [](const WiFiAP& a, const WiFiAP& b) { 
-      return a.rssi > b.rssi; 
-    });
-  
-  // Display found APs
-  Serial.printf("Found %d access points for '%s':\n", matchingAPs.size(), savedSSID.c_str());
-  for (const auto& ap : matchingAPs) {
-    Serial.printf("  %s (%d dBm, Channel %d)\n", 
-                  ap.bssid.c_str(), ap.rssi, ap.channel);
-  }
-  
-  // Connect to the best (strongest signal) AP
-  const auto& bestAP = matchingAPs[0];
-  Serial.printf("Connecting to strongest AP: %s (%d dBm)...\n", 
-                bestAP.bssid.c_str(), bestAP.rssi);
-  
-  // Parse BSSID string to byte array
-  uint8_t bssid_arr[6];
-  sscanf(bestAP.bssid.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", 
-         &bssid_arr[0], &bssid_arr[1], &bssid_arr[2], 
-         &bssid_arr[3], &bssid_arr[4], &bssid_arr[5]);
-  
-  // Get saved password (will use stored credentials)
-  String savedPassword = WiFi.psk();
-  
-  // Connect to specific BSSID on specific channel
-  WiFi.begin(savedSSID.c_str(), savedPassword.c_str(), bestAP.channel, bssid_arr);
-  
-  // Wait for connection
+  Serial.print("Connecting");
   int retries = 40;  // 40 * 500ms = 20 seconds
   while (WiFi.status() != WL_CONNECTED && retries > 0) {
     Serial.print(".");
@@ -233,14 +174,92 @@ bool connectToBestAP() {
   Serial.println();
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("Connected successfully!");
+    // Successfully connected with saved credentials
+    String connectedSSID = WiFi.SSID();
+    Serial.printf("Connected to saved network: %s\n", connectedSSID.c_str());
+    
+    // Now scan to see if there's a better AP with the same SSID
+    Serial.println("Scanning for potentially better access points...");
+    WiFi.scanNetworks(true);  // Async scan
+    delay(3000);  // Wait for scan to complete
+    int n = WiFi.scanComplete();
+    
+    if (n > 0) {
+      Serial.printf("Found %d networks\n", n);
+      
+      // Find all APs matching the connected SSID
+      std::vector<WiFiAP> matchingAPs;
+      int32_t currentRSSI = WiFi.RSSI();
+      
+      for (int i = 0; i < n; ++i) {
+        if (WiFi.SSID(i) == connectedSSID) {
+          WiFiAP ap;
+          ap.ssid = WiFi.SSID(i);
+          ap.bssid = WiFi.BSSIDstr(i);
+          ap.rssi = WiFi.RSSI(i);
+          ap.channel = WiFi.channel(i);
+          matchingAPs.push_back(ap);
+        }
+      }
+      
+      if (matchingAPs.size() > 1) {
+        // Sort by signal strength
+        std::sort(matchingAPs.begin(), matchingAPs.end(), 
+          [](const WiFiAP& a, const WiFiAP& b) { 
+            return a.rssi > b.rssi; 
+          });
+        
+        Serial.printf("Found %d access points for '%s':\n", matchingAPs.size(), connectedSSID.c_str());
+        for (const auto& ap : matchingAPs) {
+          Serial.printf("  %s (%d dBm, Channel %d)%s\n", 
+                        ap.bssid.c_str(), ap.rssi, ap.channel,
+                        (ap.rssi == currentRSSI) ? " [CURRENT]" : "");
+        }
+        
+        // Check if we're already on the best AP
+        if (matchingAPs[0].rssi > currentRSSI + 10) {  // 10 dBm better
+          Serial.printf("Found better AP with %d dBm stronger signal, reconnecting...\n", 
+                       matchingAPs[0].rssi - currentRSSI);
+          
+          // Parse BSSID string to byte array
+          uint8_t bssid_arr[6];
+          sscanf(matchingAPs[0].bssid.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", 
+                 &bssid_arr[0], &bssid_arr[1], &bssid_arr[2], 
+                 &bssid_arr[3], &bssid_arr[4], &bssid_arr[5]);
+          
+          // Reconnect to better AP (credentials already stored, just need BSSID)
+          WiFi.disconnect();
+          delay(100);
+          WiFi.begin(connectedSSID.c_str(), WiFi.psk().c_str(), matchingAPs[0].channel, bssid_arr);
+          
+          retries = 40;
+          while (WiFi.status() != WL_CONNECTED && retries > 0) {
+            Serial.print(".");
+            delay(CONNECTION_CHECK_DELAY_MS);
+            retries--;
+          }
+          Serial.println();
+          
+          if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("Reconnected to better AP: %s (%d dBm)\n", 
+                         matchingAPs[0].bssid.c_str(), matchingAPs[0].rssi);
+          }
+        } else {
+          Serial.println("Already connected to the best available AP");
+        }
+      }
+      
+      WiFi.scanDelete();  // Clean up scan results
+    }
+    
     Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
     Serial.printf("DNS: %s\n", WiFi.dnsIP(0).toString().c_str());
     return true;
+    
   } else {
-    Serial.println("Connection failed!");
-    WiFi.disconnect();
+    // Could not connect with saved credentials
+    Serial.println("No saved credentials or connection failed");
     return false;
   }
 }
