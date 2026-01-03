@@ -355,7 +355,7 @@ void checkHTTPUpdate() {
     Serial.printf("HTTP Update Progress: %d%%\n", (cur * 100) / total);
   });
   
-  httpUpdate.onError([](int err) {
+  httpUpdate.onError([&httpUpdate](int err) {
     Serial.printf("HTTP Update Error (%d): %s\n", err, httpUpdate.getLastErrorString().c_str());
   });
   
