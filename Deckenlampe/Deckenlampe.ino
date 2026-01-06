@@ -17,10 +17,22 @@
 #include "WiFi_Manager.h"
 #include "OTA_Update.h"
 #include "Version.h"
+#include <FastLED.h>
+
+#define NUM_LEDS 40
+#define DATA_PIN D3
+
+CRGB leds[NUM_LEDS];
+
 
 // Serial communication baud rate
 const unsigned long SERIAL_BAUD_RATE = 115200;
-
+void fillAndShow(CRGB color) {
+    for (int i = 0; i < NUM_LEDS; ++i) {
+        leds[i] = color;
+    }
+    FastLED.show();
+}
 /**
  * Setup function - Initializes system
  * 
@@ -38,6 +50,9 @@ void setup() {
   Serial.println("========================================\n");
   
   // Initialize WiFi connection
+   FastLED.addLeds<SK6812, DATA_PIN, GRB>(leds, NUM_LEDS).setRgbw(RgbwDefault());
+     FastLED.setBrightness(255);
+  
   initWiFi();
   
   // Wait for WiFi to be connected before starting OTA
@@ -73,6 +88,8 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     handleOTA();
   }
-  
-  delay(10);
+  fillAndShow(CRGB(255,255,255));
+  delay(1000);
+  fillAndShow(CRGB(255,200,200));
+  delay(1000);
 }
